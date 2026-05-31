@@ -1,239 +1,239 @@
-﻿#include <iostream>
+﻿#include <SFML/Graphics.hpp>
+#include <iostream>
 #include <vector>
 #include <queue>
 #include <cmath>
 #include <set>
 #include <map>
-#include <SFML/Graphics.hpp>
-#include <algorithm>
 #include <random>
+#include <algorithm>
 
 using namespace std;
 using namespace sf;
 
-// глобальные константы для настройки игрового поля
+const int GRID_SIZE = 30; // размер сетки 30x30 клеток
+const int CELL_SIZE = 25; // размер одной клетки в пикселях
+const int WINDOW_SIZE = GRID_SIZE * CELL_SIZE; // размер окна 750x750 пикселей
 
-const int GRID_SIZE = 30; // количество клеток по горизонтали и вертикали
-const int CELL_SIZE = 25; // размер одной стороны клетки в пикселях
-const int WINDOW_SIZE = GRID_SIZE * CELL_SIZE; // итоговый размер окна
+const int MIN_WEIGHT = 1; // минимальный вес клетки (самый дешёвый путь)
+const int MAX_WEIGHT = 10; // максимальный вес клетки (самый дорогой путь)
 
-const int MIN_V = 1; // минимально возможный вес клетки
-const int MAX_V = 10; // максимально возможный вес клетки
-
-// типы состояний, в которых может находиться клетка
-
-enum CellType {
-    EMPTY, // проходимая пустая клетка
-    OBSTACLE, // препятствие
-    START, // точка начала пути
-    END, // конечная точка
-    PATH // часть найденного маршрута
+enum CellType { // перечисление типов клеток
+    EMPTY, // пустая клетка (проходимая)
+    OBSTACLE, // препятствие (стена)
+    START, // стартовая клетка
+    END, // конечная клетка
+    IN_QUEUE, // клетка в очереди на рассмотрение (зелёная)
+    VISITED, // посещённая клетка (красная)
+    PATH // клетка входящая в найденный путь (фиолетовая)
 };
 
-// объект клетки на поле
-
-struct Cell {
-    CellType type; // текущий тип
-    int weight; // вес клетки
-    Cell() : type(EMPTY), weight(1) {} // конструктор: по умолчанию клетка пустая с минимальным весом
-    bool is_barrier() const { return type == OBSTACLE; } // метод проверки на препятствие
-    bool is_start()   const { return type == START; } // метод проверки на старт
-    bool is_end()     const { return type == END; } // метод проверки на финиш
-
-    // методы изменения состояния
-    void make_start() { type = START; } // делает точку стартом
-    void make_end() { type = END; } // делает точку финишем
-    void make_barrier() { type = OBSTACLE; } // делает точку препятствием
-    void make_path() { if (type != START && type != END) type = PATH; } // делает точку фрагментом пути, если она не стартовая и не финишная
-
-    // сброс клетки до пустой
-    void reset() {
-        if (type == PATH) type = EMPTY;
+struct Cell { // структура для представления клетки
+    int x, y; // координаты клетки на сетке
+    CellType type; // тип клетки (из перечисления выше)
+    int weight; // вес клетки (стоимость прохождения через неё)
+    int g, h, f; // параметры для a*: g - путь от старта, h - эвристика, f = g + h
+    Cell(int x = 0, int y = 0) : x(x), y(y), type(EMPTY), weight(1), g(0), h(0), f(0) {} // конструктор
+    void set_start() { type = START; } // устанавливает тип "старт"
+    void set_end() { type = END; } // устанавливает тип "финиш"
+    void set_wall() { type = OBSTACLE; } // устанавливает тип "стена"
+    void set_path() { // устанавливает тип "путь"
+        if (type != START && type != END) type = PATH;
+    }
+    void set_visited() { // устанавливает тип "посещённая"
+        if (type != START && type != END && type != IN_QUEUE) type = VISITED;
+    }
+    void set_in_queue() { // устанавливает тип "в очереди"
+        if (type != START && type != END && type != VISITED) type = IN_QUEUE;
+    }
+    void reset() { // сбрасывает временные типы обратно в empty
+        if (type == PATH || type == VISITED || type == IN_QUEUE) type = EMPTY;
+    }
+    bool is_wall() const { // проверяет, является ли клетка стеной
+        return type == OBSTACLE;
     }
 };
 
-// поиск в глубину: используется для проверки наличия пути от старта до финиша
-
-void dfs(int x, int y, const vector<vector<Cell>>& grid, vector<vector<bool>>& visited) {
-    if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) // проверка выхода за границы или столкновения со стеной/уже посещенной клеткой
-        return;
-    if (visited[x][y])
-        return;
-    if (grid[x][y].type == OBSTACLE)
-        return;
-    visited[x][y] = true; // помечаем клетку как достижимую
-    // рекурсивно идем во все 4 стороны
-    dfs(x + 1, y, grid, visited);
-    dfs(x - 1, y, grid, visited);
-    dfs(x, y + 1, grid, visited);
-    dfs(x, y - 1, grid, visited);
+int heuristic(const Cell& a, const Cell& b) { // функция эвристики (манхэттенское расстояние)
+    return abs(a.x - b.x) + abs(a.y - b.y); // сумма абсолютных разностей координат
 }
 
-// узел, хранящий координаты и веса для приоритетной очереди
-
-struct Node {
-    int x, y, g, h; // координаты узла (x,y), g - стоимость пути от старта до клетки, h - стоимость от клетки до финиша
-    int f() const {
-        return g + h; // f(n) = g(n) + h(n)
-    }
-    Node(int x, int y, int g = 0, int h = 0) : x(x), y(y), g(g), h(h) {
-    }
-    bool operator>(const Node& other) const { // оператор сравнения: возвращает true, если текущий узел дороже другого
-        if (f() != other.f()) return f() > other.f();
-        return h > other.h; // если f равны, выбираем тот, у которого меньше h
-    }
-};
-
-// манхэттенское расстояние
-
-int manhattan_distance(int x1, int y1, int x2, int y2) {
-    return abs(x1 - x2) + abs(y1 - y2);
+bool in_bounds(int x, int y) { // проверка, находятся ли координаты в пределах сетки
+    return x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE;
 }
 
-vector<pair<int, int>> a_star(const vector<vector<Cell>>& grid, pair<int, int> start, pair<int, int> goal) {
-    priority_queue<Node, vector<Node>, greater<Node>> open_set; // приоритетная очередь для хранения узлов, которые нужно исследовать
-    set<pair<int, int>> open_set_hash; // хэш-таблица для быстрой проверки: находится ли уже клетка в очереди на исследование
-    map<pair<int, int>, pair<int, int>> came_from; // карта ,которая хранит для каждой клетки координаты её предыдущий шаг.
-    map<pair<int, int>, int> g_score; // карта стоимостей пути.
-    int h_start = manhattan_distance(start.first, start.second, goal.first, goal.second); // вычисляем эвристическое расстояние от старта до цели
-    open_set.push(Node(start.first, start.second, 0, h_start)); // помещаем стартовый узел в очередь
-    open_set_hash.insert(start);
-    g_score[start] = 0; // стоимость достижения старта равна нулю.
+void dfs(int x, int y, const vector<vector<Cell>>& grid, vector<vector<bool>>& visited) { // обход в глубину
+    if (!in_bounds(x, y)) return; // если вышли за границы - возвращаемся
+    if (visited[x][y]) return; // если уже посещали эту клетку - возвращаемся
+    if (grid[x][y].is_wall()) return; // если клетка - стена - возвращаемся
+    visited[x][y] = true; // отмечаем клетку как посещённую
+    dfs(x + 1, y, grid, visited); // рекурсивно проверяем соседа справа
+    dfs(x - 1, y, grid, visited); // рекурсивно проверяем соседа слева
+    dfs(x, y + 1, grid, visited); // рекурсивно проверяем соседа сверху
+    dfs(x, y - 1, grid, visited); // рекурсивно проверяем соседа снизу
+}
 
-    while (!open_set.empty()) {
-        Node current = open_set.top(); // берем узел с минимальным показателем f(n)
-        open_set.pop();
-        open_set_hash.erase({ current.x, current.y });
-
-        if (current.x == goal.first && current.y == goal.second) { // проверка, если текущие координаты совпадают с целью
-            vector<pair<int, int>> path;
-            pair<int, int> current_pos = goal;
-            while (came_from.count(current_pos)) { // реконструкция пути
-                path.push_back(current_pos);
-                current_pos = came_from[current_pos];
-            }
-            path.push_back(start); // добавляем в начало сам старт
-            reverse(path.begin(), path.end()); // разворачиваем, чтобы путь шел от старта к цели
-            return path;
-        }
-
-        for (auto [dx, dy] : vector<pair<int, int>>{ {-1, 0}, {1, 0}, {0, -1}, {0, 1} }) {
-            int nx = current.x + dx;
-            int ny = current.y + dy;
-
-            if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) { // проверка границ сетки.
-                if (grid[nx][ny].is_barrier()) continue; // проверка проходимости
-
-                pair<int, int> neighbor = { nx, ny };
-                int tentative_g = g_score[{current.x, current.y}] + grid[nx][ny].weight; // g(current) + вес клетки соседа.
-
-                if (!g_score.count(neighbor) || tentative_g < g_score[neighbor]) { // если этот путь до соседа дешевле, чем найденный ранее
-                    came_from[neighbor] = { current.x, current.y }; // в эту клетку выгоднее приходить из 'current'
-                    g_score[neighbor] = tentative_g;
-                    int h = manhattan_distance(nx, ny, goal.first, goal.second); // вычисляем эвристику для соседа.
-                    if (!open_set_hash.count(neighbor)) { // если соседа еще нет в очереди на проверку — добавляем его
-                        open_set.push(Node(nx, ny, tentative_g, h));
-                        open_set_hash.insert(neighbor);
-                    }
+void generate_map(vector<vector<Cell>>& grid, int wall_probability = 25) { // генерация случайной карты
+    random_device rd; // устройство для генерации случайных чисел
+    mt19937 gen(rd()); // генератор mersenne twister
+    uniform_int_distribution<> wall_dist(0, 99); // распределение для стен (0-99)
+    uniform_int_distribution<> weight_dist(MIN_WEIGHT, MAX_WEIGHT); // распределение для весов
+    bool is_valid = false; // флаг, что карта проходима
+    while (!is_valid) { // генерируем карту, пока не получим проходимую
+        for (int i = 0; i < GRID_SIZE; ++i) {
+            for (int j = 0; j < GRID_SIZE; ++j) {
+                grid[i][j] = Cell(i, j); // создаём новую клетку с координатами
+                grid[i][j].weight = weight_dist(gen); // присваиваем случайный вес
+                if (wall_dist(gen) < wall_probability) { // если выпало число меньше вероятности
+                    grid[i][j].type = OBSTACLE; // делаем клетку стеной
                 }
             }
         }
-    }
-    return {}; // путь не найден
-}
-
-// отрисовка всех клеток на экран
-
-void draw_grid(RenderWindow& window, vector<vector<Cell>>& grid) {
-    for (int x = 0; x < GRID_SIZE; ++x) { // проходим циклом по всем клеткам нашей сетки
-        for (int y = 0; y < GRID_SIZE; ++y) {
-            RectangleShape shape(Vector2f((float)CELL_SIZE - 1.f, (float)CELL_SIZE - 1.f)); // создаем прямоугольник размером чуть меньше клетки
-            shape.setPosition((float)x * CELL_SIZE, (float)y * CELL_SIZE); // устанавливаем положение квадрата в окне
-            float weight = (float)grid[x][y].weight; // присваим клетке вес
-            int colorValue = 40 + static_cast<int>(((weight - MIN_V) / (float)(MAX_V - MIN_V)) * 215); // рассчитываем цвет для пустых клеток на основе их веса
-            switch (grid[x][y].type) { // присваиваем цвет в зависимости от типа клетки
-            case EMPTY: shape.setFillColor(Color(0, 0, colorValue)); break; // пустая - определяется весом клетки
-            case OBSTACLE: shape.setFillColor(Color::Black); break; // препятствие - чёрный
-            case START: shape.setFillColor(Color(255, 165, 0)); break; // старт - оранжевый
-            case END: shape.setFillColor(Color(64, 224, 208)); break; // конец - бирюзовый
-            case PATH: shape.setFillColor(Color(139, 0, 255)); break; // путь - фиолетовый
-            }
-            window.draw(shape); // отрисовка клетки
-        }
-    }
-}
-
-// генерация случайной карты с гарантированной проходимостью
-
-void generate_random_map(vector<vector<Cell>>& grid) {
-    random_device rd;
-    mt19937 gen(rd());
-    uniform_int_distribution<> wall_dist(0, 3); // 25% шанс генерации препятствия (если выпадет 0)
-    uniform_int_distribution<> weight_dist(MIN_V, MAX_V); // случайный вес для клетки от 1 до 10
-    bool valid_map = false; // флаг: стала ли карта пригодной для использования
-    while (!valid_map) { // цикл будет работать до тех пор, пока не сгенерируется карта, которую можно пройти
-        for (int x = 0; x < GRID_SIZE; ++x) { // заполнение сетки случайными данными
-            for (int y = 0; y < GRID_SIZE; ++y) {
-                grid[x][y].type = EMPTY; // сначала делаем клетку пустой
-                grid[x][y].weight = weight_dist(gen); // задаем ей случайную стоимость прохода
-                if (wall_dist(gen) == 0) // с шансом 25% превращаем клетку в препятствие
-                    grid[x][y].type = OBSTACLE;
-            }
-        }
-        grid[0][0].type = START; // гарантируем, что старт и финиш — не стены
-        grid[GRID_SIZE - 1][GRID_SIZE - 1].type = END;
-        vector<vector<bool>> visited(GRID_SIZE, vector<bool>(GRID_SIZE, false)); // создаем вспомогательную матрицу посещенных клеток для dfs
-        dfs(0, 0, grid, visited); // запускаем поиск в глубину из верхней левой точки
-        valid_map = true; // предполагаем, что карта проходимая
-        for (int x = 0; x < GRID_SIZE; ++x) {
-            for (int y = 0; y < GRID_SIZE; ++y) {
-                if (grid[x][y].type != OBSTACLE && !visited[x][y]) { // если клетка — не стена, но dfs до неё не дотянулся
-                    valid_map = false; // помечаем карту как непроходимую
+        grid[0][0].type = START; // старт в клетке (0,0)
+        grid[GRID_SIZE - 1][GRID_SIZE - 1].type = END; // финиш в клетке (29,29)
+        vector<vector<bool>> visited(GRID_SIZE, vector<bool>(GRID_SIZE, false)); // матрица посещённых
+        dfs(0, 0, grid, visited); // запускаем dfs из старта
+        is_valid = true; // предполагаем, что карта проходима
+        for (int i = 0; i < GRID_SIZE; ++i) {
+            for (int j = 0; j < GRID_SIZE; ++j) {
+                if (grid[i][j].type != OBSTACLE && !visited[i][j]) { // если клетка не стена и не достигнута
+                    is_valid = false; // карта непроходима
                     break;
                 }
             }
-            if (!valid_map)
+            if (!is_valid) break;
+        }
+    }
+}
+
+void clear_path(vector<vector<Cell>>& grid) { // сброс визуализации пути
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            grid[i][j].reset(); // сбрасываем временные типы клеток
+        }
+    }
+    grid[0][0].type = START; // восстанавливаем старт
+    grid[GRID_SIZE - 1][GRID_SIZE - 1].type = END; // восстанавливаем финиш
+}
+
+vector<pair<int, int>> a_star(vector<vector<Cell>>& grid, pair<int, int> start, pair<int, int> goal) { // алгоритм a*
+    auto cmp = [](const tuple<int, int, int>& a, const tuple<int, int, int>& b) { // компаратор для очереди
+        return get<0>(a) > get<0>(b); // чем меньше f, тем выше приоритет
+        };
+    priority_queue<tuple<int, int, int>, vector<tuple<int, int, int>>, decltype(cmp)> pq(cmp); // приоритетная очередь
+    set<pair<int, int>> open_set; // множество клеток в очереди
+    set<pair<int, int>> closed_set; // множество обработанных клеток
+    map<pair<int, int>, int> g_score; // лучшая известная стоимость g для каждой клетки
+    map<pair<int, int>, pair<int, int>> came_from; // предыдущая клетка для восстановления пути
+    int start_h = heuristic(grid[start.first][start.second], grid[goal.first][goal.second]); // эвристика для старта
+    pq.push({ start_h, start.first, start.second }); // добавляем старт в очередь
+    open_set.insert({ start.first, start.second }); // отмечаем в множестве очереди
+    g_score[{start.first, start.second}] = 0; // стоимость пути до старта = 0
+    vector<pair<int, int>> dirs = { {1,0}, {-1,0}, {0,1}, {0,-1} }; // 4 направления движения
+    while (!pq.empty()) { // пока очередь не пуста
+        auto [f_val, x, y] = pq.top(); // берём клетку с минимальным f
+        pq.pop(); // удаляем её из очереди
+        pair<int, int> current = { x, y }; // текущая клетка
+        open_set.erase(current); // удаляем из множества очереди
+        if (closed_set.count(current)) continue; // если уже обработана - пропускаем
+        closed_set.insert(current); // отмечаем как обработанную
+        if (grid[x][y].type != START && grid[x][y].type != END) { // если не старт и не финиш
+            grid[x][y].set_visited(); // отмечаем клетку как посещённую
+        }
+        if (current == goal) { // достигли цели
+            vector<pair<int, int>> path; // вектор для хранения пути
+            pair<int, int> step = goal; // начинаем с финиша
+            while (came_from.count(step)) { // пока есть предыдущая клетка
+                path.push_back(step); // добавляем текущую клетку
+                step = came_from[step]; // переходим к предыдущей
+            }
+            path.push_back(start); // добавляем старт
+            reverse(path.begin(), path.end()); // разворачиваем путь
+            int total_cost = 0; // общая стоимость пути
+            for (auto [px, py] : path) { // проходим по всем клеткам пути
+                total_cost += grid[px][py].weight; // суммируем веса клеток
+                if (grid[px][py].type != START && grid[px][py].type != END) {
+                    grid[px][py].set_path(); // отмечаем клетки пути
+                }
+            }
+            cout << "Кратчайшее расстояние: " << total_cost << endl; // выводим стоимость
+            return path; // возвращаем найденный путь
+        }
+        for (auto [dx, dy] : dirs) { // для каждого направления
+            int nx = x + dx; // координата x соседа
+            int ny = y + dy; // координата y соседа
+            pair<int, int> neighbor = { nx, ny }; // пара координат соседа
+            if (!in_bounds(nx, ny)) continue; // если за границами - пропускаем
+            if (grid[nx][ny].is_wall()) continue; // если стена - пропускаем
+            if (closed_set.count(neighbor)) continue; // если уже обработан - пропускаем
+            int move_cost = grid[nx][ny].weight; // стоимость входа в клетку
+            int tentative_g = g_score[current] + move_cost; // новая стоимость пути до соседа
+            if (!g_score.count(neighbor) || tentative_g < g_score[neighbor]) { // если нашли более дешёвый путь
+                g_score[neighbor] = tentative_g; // обновляем лучшую стоимость
+                came_from[neighbor] = current; // запоминаем, откуда пришли
+                int h_val = heuristic(grid[nx][ny], grid[goal.first][goal.second]); // вычисляем эвристику
+                int new_f = tentative_g + h_val; // вычисляем новую полную стоимость f
+                pq.push({ new_f, nx, ny }); // добавляем соседа в очередь
+                open_set.insert(neighbor); // отмечаем в множестве очереди
+                if (grid[nx][ny].type != START && grid[nx][ny].type != END) {
+                    grid[nx][ny].set_in_queue(); // отмечаем клетку как находящуюся в очереди
+                }
+            }
+        }
+    }
+    return {}; // возвращаем пустой вектор (путь не найден)
+}
+
+void render_grid(RenderWindow& window, vector<vector<Cell>>& grid) { // отрисовка сетки
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            RectangleShape rect(Vector2f(CELL_SIZE - 1, CELL_SIZE - 1)); // прямоугольник с зазором 1 пиксель
+            rect.setPosition(i * CELL_SIZE, j * CELL_SIZE); // устанавливаем позицию
+            switch (grid[i][j].type) { // выбираем цвет в зависимости от типа клетки
+            case EMPTY: {
+                float ratio = (grid[i][j].weight - MIN_WEIGHT) / (float)(MAX_WEIGHT - MIN_WEIGHT); // отношение веса
+                int shade = 100 + (int)(155 * ratio); // оттенок от 100 до 255
+                rect.setFillColor(Color(shade, shade, shade)); // оттенки серого
                 break;
-        } // если valid_map остался true — цикл while завершится и карта станет проходимой
+            }
+            case OBSTACLE: rect.setFillColor(Color::Black); break; // стена - чёрный
+            case START: rect.setFillColor(Color(255, 165, 0)); break; // старт - оранжевый
+            case END: rect.setFillColor(Color(64, 224, 208)); break; // финиш - бирюзовый
+            case IN_QUEUE: rect.setFillColor(Color::Green); break; // в очереди - зелёный
+            case VISITED: rect.setFillColor(Color::Red); break; // посещённая - красный
+            case PATH: rect.setFillColor(Color(139, 0, 255)); break; // путь - фиолетовый
+            }
+            window.draw(rect); // отрисовываем прямоугольник
+        }
     }
 }
 
 int main() {
-    vector<vector<Cell>> grid(GRID_SIZE, vector<Cell>(GRID_SIZE)); // создаем сетку объектов Cell размером 30x30
-    pair<int, int> startPos = { 0, 0 }; // устанавливаем координаты старта и финиша
-    pair<int, int> goalPos = { GRID_SIZE - 1, GRID_SIZE - 1 };
-    generate_random_map(grid); // генерируем начальную карту со случайными весами и стенами
-    RenderWindow window(VideoMode(WINDOW_SIZE, WINDOW_SIZE), "алгоритм A*"); // создаем окно размером 750x750 пикселей
-    while (window.isOpen()) {
-        Event event;
-        while (window.pollEvent(event)) { // опрос событий (нажатия клавиш, закрытия окна)
-            if (event.type == Event::Closed)
-                window.close();
-            if (event.type == Event::KeyPressed) { // обработка нажатий клавиш
-                if (event.key.code == Keyboard::Space) { // Нажатие пробела — запуск поиска пути
-                    for (auto& row : grid) { // сначала проходим по всей сетке и сбрасываем старые пути
-                        for (auto& cell : row) cell.reset();
-                    }
-                    auto path = a_star(grid, startPos, goalPos); // вызываем алгоритм A* и получаем вектор координат пути
-                    if (!path.empty()) { // если путь найден
-                        int total_weight = 0; // переменная для подсчета общей стоимости пути
-                        for (auto [x, y] : path) {
-                            total_weight += grid[x][y].weight; // суммируем веса клеток
-                            grid[x][y].make_path(); // красим клетку в цвет пути
-                        }
-                        cout << "Кратчайшее расстояние: " << total_weight << endl; // Выводим результат в консоль
-                    }
+    RenderWindow window(VideoMode(WINDOW_SIZE, WINDOW_SIZE), "A* algoritm"); // создаём окно
+    vector<vector<Cell>> grid(GRID_SIZE, vector<Cell>(GRID_SIZE)); // создаём сетку клеток
+    generate_map(grid, 25); // генерируем начальную карту с 25% стен
+    pair<int, int> start_pos = { 0, 0 }; // координаты старта (левый верхний угол)
+    pair<int, int> end_pos = { GRID_SIZE - 1, GRID_SIZE - 1 }; // координаты финиша (правый нижний угол)
+    while (window.isOpen()) { // главный игровой цикл
+        Event event; // объект для хранения событий
+        while (window.pollEvent(event)) { // обработка всех событий
+            if (event.type == Event::Closed) { // если нажата кнопка закрытия
+                window.close(); // закрываем окно
+            }
+            if (event.type == Event::KeyPressed) { // если нажата клавиша
+                if (event.key.code == Keyboard::Space) { // если пробел
+                    clear_path(grid);        // сбрасываем предыдущий путь
+                    a_star(grid, start_pos, end_pos); // запускаем поиск пути
                 }
-                if (event.key.code == Keyboard::R) { // нажатие клавиши r — полная перегенерация мира
-                    generate_random_map(grid); // создаем новую карту
-                    grid[startPos.first][startPos.second].make_start(); // ставим старт и финиш на их места
-                    grid[goalPos.first][goalPos.second].make_end();
+                if (event.key.code == Keyboard::R) { // если клавиша r
+                    generate_map(grid, 25);  // генерируем новую карту
+                    clear_path(grid);        // сбрасываем путь
                 }
             }
         }
-        window.clear(); // очищаем экран
-        draw_grid(window, grid); // вызываем функцию отрисовки нашей сетки
-        window.display(); // выводим содержимое буфера на экран
+        window.clear(Color::White); // очищаем окно белым цветом
+        render_grid(window, grid); // отрисовываем сетку
+        window.display(); // отображаем нарисованное на экране
     }
     return 0;
 }
